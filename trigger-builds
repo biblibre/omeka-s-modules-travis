@@ -1,0 +1,62 @@
+#!/usr/bin/env perl
+
+use Modern::Perl;
+use URI::Escape;
+use LWP::UserAgent;
+use JSON;
+use FindBin qw($Bin);
+
+my $omeka_s_dir = "$Bin/omeka-s";
+unless (-d $omeka_s_dir) {
+    say "First run: I'll just clone omeka-s and quit";
+    qx{git clone --depth=1 https://github.com/omeka/omeka-s.git $omeka_s_dir};
+    exit;
+}
+
+chdir $omeka_s_dir or die "Can't chdir to $omeka_s_dir: $!\n";
+qx{git fetch --depth=1 --quiet};
+my @revs = qx{git rev-parse develop origin/develop};
+if ($revs[0] eq $revs[1]) {
+    say "No new commits";
+    exit;
+}
+
+qx{git reset --quiet --hard origin/develop};
+my $commit = `git log --oneline -1`;
+chomp $commit;
+
+my $token = `travis token --org --no-interactive`;
+chomp $token;
+if (!$token) {
+    say "Failed getting token, try login with travis CLI client and start again";
+    exit;
+}
+
+my $body = encode_json({
+    request => {
+        message => "New commit on omeka/omeka-s ($commit)",
+        branch => 'master',
+    }
+});
+
+my $ua = LWP::UserAgent->new;
+my %headers = (
+    'Content-Type' => 'application/json',
+    'Accept' => 'application/json',
+    'Travis-API-Version' => '3',
+    'Authorization' => "token $token",
+);
+
+my @repos = `travis repos --org --match 'biblibre/omeka-s-module*' --active --no-interactive`;
+foreach my $repo (@repos) {
+    chomp $repo;
+    print "Triggering new build for $repo... ";
+    $repo = uri_escape($repo);
+    my $url = "https://api.travis-ci.org/repo/$repo/requests";
+    my $response = $ua->post($url, %headers, Content => $body);
+    if ($response->is_success) {
+        say 'OK';
+    } else {
+        say 'FAIL (' . $response->status_line . ')';
+    }
+}
